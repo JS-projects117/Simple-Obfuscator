@@ -1,38 +1,22 @@
-using
-System.Xml.Serialization;
-using
-UnityEngine;
-using
-UnityEngine.EventSystems;
-public
-class
-AttackButton
-:
-MonoBehaviour,
-IPointerDownHandler,
-IPointerUpHandler
+
+using System.Xml.Serialization;
+
+using UnityEngine;
+
+using UnityEngine.EventSystems;
+public class d : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
 {
-public
-bool
-pressed
-=
-false;
-public
-void
-OnPointerUp(PointerEventData
-eventData)
-{
-pressed
-=
-false;
-}
-public
-void
-OnPointerDown(PointerEventData
-eventData)
-{
-pressed
-=
-true;
-}
+    public bool b = false;
+
+
+    public void a(PointerEventData eventData)
+    {
+        b = false;
+
+    }
+
+    public void c(PointerEventData eventData)
+    {
+        b = true;
+    }
 }

@@ -12,6 +12,7 @@ public class AttackButton : MonoBehaviour, IPointerDownHandler, IPointerUpHandle
     public void OnPointerUp(PointerEventData eventData)
     {
         pressed = false;
+
     }
 
     public void OnPointerDown(PointerEventData eventData)
