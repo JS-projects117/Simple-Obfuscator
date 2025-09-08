@@ -6,6 +6,26 @@ import java.util.List;
 import java.util.Scanner;
 
 public class Main {
+
+    static final String[] wordsToIgnore = {//removes words that contains the word at all
+            "Math",
+            "Random",
+            "foreach",
+            "switch",
+            "case",
+            "Update",
+            "Start",
+            "while",
+            "return",
+            "catch",
+            "Compare",
+            "[",
+            "Awake",
+            "if",
+            "for"
+
+    };
+
     public static void main(String[] args) throws IOException {
 
         // File file = new File("src/filedForObfuscation/example.txt");
@@ -21,7 +41,7 @@ public class Main {
         }
 
 
-LinkedList<File> fileList = new LinkedList<>();
+        LinkedList<File> fileList = new LinkedList<>();
 
         findAllFiles(fileList, "src/filesForObfuscation");
 
@@ -43,15 +63,14 @@ LinkedList<File> fileList = new LinkedList<>();
 
     }
 
-    private static void findAllFiles(LinkedList<File> fileList, String path){
+    private static void findAllFiles(LinkedList<File> fileList, String path) {
 
 
-        for(File x : new File(path).listFiles()){
-            if(x.isDirectory()){
+        for (File x : new File(path).listFiles()) {
+            if (x.isDirectory()) {
                 findAllFiles(fileList, x.getPath());
 
-            }
-            else{
+            } else {
                 fileList.add(x);
             }
         }
@@ -69,16 +88,24 @@ LinkedList<File> fileList = new LinkedList<>();
                 String line = scnr.nextLine() + "\n";
                 String newLine = "";
 
+                String bestMatch = "";
                 boolean foundMatch = false;
                 for (String varName : varMap.keySet()) {
                     if (line.contains(varName)) {
-                        foundMatch = true;
+                        if (bestMatch.equals("")) {
+                            foundMatch = true;
+                            bestMatch = varName;
 
-                        newLine = line.replace(varName, varMap.get(varName));
-
+                        } else if (bestMatch.length() < varName.length()) {
+                            bestMatch = varName;
+                        }
                     }
                 }
-                if (foundMatch) {
+
+                if(!bestMatch.equals(""))
+              newLine = line.replace(bestMatch, varMap.get(bestMatch));
+
+                if (!bestMatch.equals("")) {
                     write.write(newLine);
                 } else {
                     write.write(line);
@@ -99,8 +126,30 @@ LinkedList<File> fileList = new LinkedList<>();
             wordBank.add(letters[i]);
         }
 
+        String[] keySet = varMap.keySet().toArray(new String[0]);
+        for (String key : keySet) {
+
+            for(String word : wordsToIgnore){
+               if( key.contains(word)){
+                   varMap.remove(key);
+               }
+            }
+            if(key.contains(".")){
+                varMap.remove(key);
+
+            } else if (key.contains("<") && !key.contains("T")) {
+                varMap.put( varMap.get(key).split("<")[0], "");
+                varMap.remove(key);
+
+            }
+            else{
+                varMap.remove(key);
+            }
+        }
+
         int j = 0;
         for (String key : varMap.keySet()) {
+
             String newWord = GenerateWord("", wordBank, j);
             varMap.replace(key, newWord);
             ++j;
@@ -123,24 +172,23 @@ LinkedList<File> fileList = new LinkedList<>();
     private static void loadVariables(HashMap<String, String> variableMap, File[] files) throws FileNotFoundException {
         boolean debug = false;
 
-for(File file : files){
+        for (File file : files) {
 
 
-    Scanner scnr = new Scanner(file);
-        while(scnr.hasNextLine()) {
-            String line = scnr.nextLine();
-            if (line.contains("public") || line.contains("private") || line.contains("protected") || line.contains("void")) {
-                if (line.contains("class")) {
+            Scanner scnr = new Scanner(file);
+            while (scnr.hasNextLine()) {
+                String line = scnr.nextLine();
+
+   if (line.contains("class")) {
                     int startIndex = line.indexOf("class") + "class".length() + 1;
 
                     int endIndex = 0;
 
-                    if(line.substring(startIndex).contains(" ")){
+                    if (line.substring(startIndex).contains(" ")) {
                         endIndex = line.substring(startIndex).indexOf(' ') + startIndex;
-                    }else if(line.substring(startIndex).contains("{")){
-                        endIndex = line.substring(startIndex).indexOf(' ') + startIndex;
-                    }
-                    else{
+                    } else if (line.substring(startIndex).contains("{")) {
+                        endIndex = line.substring(startIndex).indexOf('{') + startIndex;
+                    } else {
                         endIndex = line.substring(startIndex).length() + startIndex;
                     }
 
@@ -148,73 +196,58 @@ for(File file : files){
                         System.out.println(line.substring(startIndex, endIndex));
                     try {
                         variableMap.put(line.substring(startIndex, endIndex), "");
-                    }
-                    catch (Exception e){
+                    } catch (Exception e) {
                         System.out.println(line);
                         System.out.println(e);
                     }
                 }
-                else if (line.contains("(")) {
-                    int endIndex = line.indexOf("(");
+                    else if (line.contains("(")) {
+                        int endIndex = line.indexOf("(");
 
-                    while (line.charAt(endIndex -1) == ' ' || line.charAt(endIndex) == ' '){
-                        endIndex -= 1;
-                    }
-                    int startIndex = 0;
-
-
-                    for (int i = endIndex;i >= 0 && line.charAt(i) != ' '; --i) {
-                        startIndex = i;
-                    }
-
-                    if(line.charAt(endIndex) != ' ' && line.charAt(endIndex) != '(')
-                        ++endIndex;
-
-//                    System.out.println(startIndex + "     end =  " + endIndex);
-//                    System.out.println(line.substring(startIndex, endIndex));
-                    if (variableMap.get(line.substring(startIndex, endIndex)) == null) {
-                        variableMap.put(line.substring(startIndex, endIndex), "");
-                    }
-                }
-//                else if (line.contains("(")) {
-//                    int endIndex = line.indexOf("(");
-//                    int startIndex = 0;
-//                    for (int i = line.indexOf("("); line.charAt(i) != ' '; --i) {
-//                        startIndex = i;
-//
-//                    }
-//
-//                    if (debug)
-//                        System.out.println(line.substring(startIndex, endIndex));
-//
-//                    if (variableMap.get(line.substring(startIndex, endIndex)) == null) {
-//                        variableMap.put(line.substring(startIndex, endIndex), "");
-//                    }
-//                }
-
-            }
-            else if (line.contains(";")) {
-                if (line.contains("=")) {
-                    int endIndex = line.indexOf("=");
-
-                    while (line.charAt(endIndex -1) == ' ' || line.charAt(endIndex) == ' '){
-                        endIndex -= 1;
-                    }
-                    int startIndex = 0;
+                        while (line.charAt(endIndex - 1) == ' ' || line.charAt(endIndex) == ' ') {
+                            endIndex -= 1;
+                        }
+                        int startIndex = 0;
 
 
-                    for (int i = endIndex;i >= 0 && line.charAt(i) != ' '; --i) {
+                        for (int i = endIndex; i >= 0 && line.charAt(i) != ' '; --i) {
                             startIndex = i;
                         }
-                    endIndex += 1;
+
+                        if (line.charAt(endIndex) != ' ' && line.charAt(endIndex) != '(')
+                            ++endIndex;
+
+                        if (variableMap.get(line.substring(startIndex, endIndex)) == null) {
+                            variableMap.put(line.substring(startIndex, endIndex), "");
+                        }
+                    }
+
+
+            else if (line.contains(";") && !line.contains("import") && !line.contains("using")) {
+
+                    if (line.contains("=")) {
+                        int endIndex = line.indexOf("=");
+
+                        while (endIndex > 0 && line.charAt(endIndex - 1) == ' ') {
+                            endIndex -= 1;
+
+                        }
+
+                        int startIndex = 0;
+
+
+                        for (int i = endIndex + 1; i >= 0 && line.charAt(i) != ' '; --i) {
+                            startIndex = i;
+                        }
+                        endIndex += 1;
 //                    System.out.println(startIndex + "     end =  " + endIndex);
 //                    System.out.println(line.substring(startIndex, endIndex));
-                    if (variableMap.get(line.substring(startIndex, endIndex)) == null) {
-                        variableMap.put(line.substring(startIndex, endIndex), "");
+                        if (variableMap.get(line.substring(startIndex, endIndex)) == null) {
+                            variableMap.put(line.substring(startIndex, endIndex), "");
+                        }
                     }
                 }
             }
-        }
 
 
         }
