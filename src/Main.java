@@ -1,507 +1,294 @@
-import java.io.*;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Stream;
 
-public class Main {
-
-    static final String[] wordsToIgnore = {
-            "Math", "Random", "foreach", "switch", "case", "Update", "Start",
-            "while", "return", "catch", "Compare", "[", "Awake", "if", "for",
-            // Additional Unity lifecycle methods
-            "FixedUpdate", "LateUpdate", "OnEnable", "OnDisable", "OnDestroy",
-            "OnTriggerEnter", "OnTriggerExit", "OnCollisionEnter", "OnCollisionExit",
-            "OnGUI", "OnValidate", "Reset", "OnDrawGizmos", "OnDrawGizmosSelected",
-            // System and Unity types
-            "MonoBehaviour", "ScriptableObject", "GameObject", "Transform",
-            "Vector3", "Vector2", "Quaternion", "string", "int", "float",
-            "bool", "void", "object", "List", "Dictionary", "Array",
-            "Component", "Rigidbody", "Collider", "Renderer", "Camera"
-    };
-
-    // Unity serialization attributes that require name preservation
-    static final String[] serializationAttributes = {
-            "SerializeField", "SerializeReference", "Header", "Space",
-            "Range", "Tooltip", "HideInInspector"
-    };
-
-    // Global maps for cross-file consistency
-    static HashMap<String, String> globalVariableMap = new HashMap<>();
-    static HashMap<String, HashSet<String>> symbolReferences = new HashMap<>();
-    static HashMap<String, String> symbolDefinitions = new HashMap<>();
-    static HashSet<String> serializedFields = new HashSet<>();
-    static HashSet<String> overrideMethods = new HashSet<>();
-    static HashMap<String, FileAnalysis> fileAnalyses = new HashMap<>();
-
-    static class FileAnalysis {
-        HashSet<String> definedSymbols = new HashSet<>();
-        HashSet<String> referencedSymbols = new HashSet<>();
-        String content;
-        String originalPath;
-    }
+/**
+ * Simple-Obfuscator entry point: renames identifiers in the C# scripts of a Unity
+ * project to short meaningless names while preserving everything Unity resolves by
+ * name. See {@link Options#USAGE}.
+ */
+public final class Main {
 
     public static void main(String[] args) throws IOException {
-        System.out.println("=== Phase 1: Finding Files ===");
-        String filePath = "src/filesForObfuscation";
+        Options options;
+        try {
+            options = Options.parse(args);
+        } catch (IllegalArgumentException e) {
+            System.err.println("error: " + e.getMessage());
+            System.err.println();
+            System.err.println(Options.USAGE);
+            System.exit(2);
+            return;
+        }
+        int code = run(options, System.out);
+        System.exit(code);
+    }
 
-        while (true) {
-            if (new File(filePath).isDirectory()) {
-                filePath += "/" + new File(filePath).getName();
-            } else {
-                break;
+    public static int run(Options options, PrintStream out) throws IOException {
+        Path input = Paths.get(options.inputDir).toAbsolutePath().normalize();
+        Path output = Paths.get(options.outputDir).toAbsolutePath().normalize();
+        if (!Files.isDirectory(input)) {
+            out.println("error: input folder does not exist: " + input);
+            return 2;
+        }
+        if (output.startsWith(input) && !options.dryRun) {
+            out.println("error: output folder must not be inside the input folder");
+            return 2;
+        }
+
+        // ---- Phase 1: find and parse files
+        List<Path> csFiles;
+        List<Path> otherFiles = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(input)) {
+            List<Path> all = new ArrayList<>();
+            walk.filter(Files::isRegularFile).forEach(all::add);
+            all.sort(Comparator.comparing(Path::toString));
+            csFiles = new ArrayList<>();
+            for (Path p : all) {
+                if (p.toString().endsWith(".cs")) csFiles.add(p);
+                else otherFiles.add(p);
+            }
+        }
+        out.println("Simple-Obfuscator");
+        out.println("  input : " + input);
+        out.println("  output: " + output + (options.dryRun ? " (dry run)" : ""));
+        out.println("  found " + csFiles.size() + " C# file(s)");
+
+        Model.Project project = new Model.Project();
+        int parseErrors = 0;
+        for (Path p : csFiles) {
+            String src = Files.readString(p, StandardCharsets.UTF_8);
+            String rel = input.relativize(p).toString().replace('\\', '/');
+            Model.CsFile f = new Model.CsFile(p.toString(), rel, Lexer.tokenize(src));
+            project.files.add(f);
+            try {
+                Parser.parse(project, f);
+            } catch (Parser.ParseException e) {
+                out.println("  parse error: " + e.getMessage());
+                parseErrors++;
+            } catch (RuntimeException e) {
+                out.println("  parse error in " + rel + ": " + e);
+                parseErrors++;
+            }
+        }
+        if (parseErrors > 0) {
+            out.println("error: " + parseErrors + " file(s) could not be parsed; nothing was written. "
+                    + "Renaming with an incomplete picture of the project would produce code that does not compile.");
+            return 1;
+        }
+        int typeCount = project.typesByKey.size();
+        int memberCount = 0;
+        for (Model.TypeDecl t : project.typesByKey.values()) memberCount += t.members.size();
+        out.println("  parsed " + typeCount + " type(s), " + memberCount + " member(s)");
+
+        // ---- Phase 2: analyse
+        Resolver resolver = new Resolver(project);
+        Analyzer analyzer = new Analyzer(project, resolver, options);
+        analyzer.run();
+
+        int typesRenamed = 0, typesKept = 0, membersRenamed = 0, membersKept = 0;
+        for (String name : analyzer.declaredTypeNames) {
+            if (analyzer.globalMap.containsKey(name)) typesRenamed++;
+            else typesKept++;
+        }
+        for (Map.Entry<String, List<Model.MemberDecl>> e : analyzer.membersByName.entrySet()) {
+            if (analyzer.globalMap.containsKey(e.getKey())) membersRenamed += e.getValue().size();
+            else membersKept += e.getValue().size();
+        }
+        out.println("  type names    : " + typesRenamed + " renamed, " + typesKept + " kept");
+        out.println("  member names  : " + membersRenamed + " renamed, " + membersKept + " kept");
+        out.println("  locals/params : " + analyzer.localCount + " renamed");
+
+        if (options.verbose) {
+            out.println();
+            out.println("Kept names:");
+            for (Map.Entry<String, String> e : analyzer.keep.entrySet()) {
+                if (analyzer.declaredNames.contains(e.getKey())) out.println("  " + e.getKey() + "  <- " + e.getValue());
+            }
+            out.println();
+            out.println("Renamed:");
+            for (Map.Entry<String, String> e : analyzer.globalMap.entrySet()) {
+                out.println("  " + e.getKey() + " -> " + e.getValue());
             }
         }
 
-        LinkedList<File> fileList = new LinkedList<>();
-        findAllFiles(fileList, "src/filesForObfuscation");
-        File[] files = fileList.toArray(new File[0]);
-
-        System.out.println("Found " + files.length + " files");
-
-        System.out.println("\n=== Phase 2: Analyzing All Files ===");
-        analyzeAllFiles(files);
-
-        System.out.println("\n=== Phase 3: Loading Variables (Enhanced) ===");
-        loadVariables(globalVariableMap, files);
-
-        System.out.println("\n=== Phase 4: Building Cross-References ===");
-        buildCrossReferences();
-
-        System.out.println("\nBefore obfuscation:");
-        for (String key : globalVariableMap.keySet()) {
-            System.out.println(key + "     val: " + globalVariableMap.get(key));
+        // ---- Phase 3: rewrite
+        Map<Model.CsFile, String> outputs = new HashMap<>();
+        Map<Model.CsFile, String> outputNames = new HashMap<>(); // relative output path
+        for (Model.CsFile f : project.files) {
+            rewrite(f, resolver, analyzer, options);
+            outputs.put(f, render(f, options));
+            outputNames.put(f, outputPathFor(f, analyzer));
         }
 
-        System.out.println("\n=== Phase 5: Applying Obfuscation ===");
-        obfuscate(globalVariableMap, files);
-
-        System.out.println("\nAfter obfuscation:");
-        for (String key : globalVariableMap.keySet()) {
-            System.out.println(key + "     val: " + globalVariableMap.get(key));
+        if (options.dryRun) {
+            out.println();
+            out.println("Dry run: no files written.");
+            for (Model.CsFile f : project.files) {
+                String o = outputNames.get(f);
+                if (!o.equals(f.relativePath)) out.println("  " + f.relativePath + " -> " + o);
+            }
+            return 0;
         }
 
-        printStatistics();
-    }
-
-    private static void findAllFiles(LinkedList<File> fileList, String path) {
-        File[] filesInDir = new File(path).listFiles();
-        if (filesInDir != null) {
-            for (File x : filesInDir) {
-                if (x.isDirectory()) {
-                    findAllFiles(fileList, x.getPath());
-                } else if (x.getName().endsWith(".cs")) {
-                    fileList.add(x);
+        // ---- Phase 4: write
+        if (options.clean && Files.exists(output)) {
+            deleteRecursively(output);
+        }
+        Files.createDirectories(output);
+        Set<String> handledMeta = new HashSet<>();
+        int written = 0;
+        for (Model.CsFile f : project.files) {
+            String rel = outputNames.get(f);
+            Path target = output.resolve(rel);
+            Files.createDirectories(target.getParent());
+            Files.writeString(target, outputs.get(f), StandardCharsets.UTF_8);
+            written++;
+            // carry the .meta file (keeps the script GUID so scene references survive)
+            Path meta = input.resolve(f.relativePath + ".meta");
+            if (Files.isRegularFile(meta)) {
+                handledMeta.add(f.relativePath + ".meta");
+                if (options.copyOthers) {
+                    Path metaTarget = output.resolve(rel + ".meta");
+                    Files.copy(meta, metaTarget, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
             }
+            if (!rel.equals(f.relativePath)) out.println("  renamed file " + f.relativePath + " -> " + rel);
         }
-    }
-
-    private static void analyzeAllFiles(File[] files) throws IOException {
-        for (File file : files) {
-            System.out.println("Analyzing: " + file.getName());
-            FileAnalysis analysis = analyzeFile(file);
-            fileAnalyses.put(file.getAbsolutePath(), analysis);
-        }
-    }
-
-    private static FileAnalysis analyzeFile(File file) throws IOException {
-        FileAnalysis analysis = new FileAnalysis();
-        analysis.originalPath = file.getAbsolutePath();
-
-        Scanner scnr = new Scanner(file);
-        StringBuilder contentBuilder = new StringBuilder();
-        while (scnr.hasNextLine()) {
-            contentBuilder.append(scnr.nextLine()).append("\n");
-        }
-        scnr.close();
-
-        analysis.content = contentBuilder.toString();
-        String contentWithoutComments = removeCommentsAndStrings(analysis.content);
-
-        findDefinedSymbols(contentWithoutComments, analysis);
-        findReferencedSymbols(analysis.content, analysis);
-        findSerializedFields(analysis.content);
-
-        return analysis;
-    }
-
-    private static void findDefinedSymbols(String content, FileAnalysis analysis) {
-        Pattern classPattern = Pattern.compile(
-                "(?:public|private|protected|internal)?\\s*(?:abstract|sealed|static)?\\s*class\\s+" +
-                        "([a-zA-Z_]\\w*)(?:\\s*:\\s*[\\w\\s,<>]+)?\\s*\\{"
-        );
-        Matcher classMatcher = classPattern.matcher(content);
-        while (classMatcher.find()) {
-            String className = classMatcher.group(1);
-            if (!shouldIgnore(className)) {
-                analysis.definedSymbols.add(className);
-                symbolDefinitions.put(className, analysis.originalPath);
+        int copied = 0;
+        if (options.copyOthers) {
+            for (Path p : otherFiles) {
+                String rel = input.relativize(p).toString().replace('\\', '/');
+                if (handledMeta.contains(rel)) continue;
+                Path target = output.resolve(rel);
+                Files.createDirectories(target.getParent());
+                Files.copy(p, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                copied++;
             }
         }
+        out.println("  wrote " + written + " C# file(s), copied " + copied + " other file(s)");
 
-        // Enhanced method detection with override/virtual/abstract checks
-        Pattern methodPattern = Pattern.compile(
-                "(?:public|private|protected|internal|static)?\\s*(virtual|override|abstract|async)?\\s*" +
-                        "(?:void|int|float|bool|string|[A-Z]\\w*(?:<[^>]+>)?)\\s+([a-zA-Z_]\\w*)\\s*\\([^)]*\\)"
-        );
-        Matcher methodMatcher = methodPattern.matcher(content);
-        while (methodMatcher.find()) {
-            String modifier = methodMatcher.group(1);
-            String methodName = methodMatcher.group(2);
-
-            if (!shouldIgnore(methodName) && !isConstructorName(methodName, analysis.definedSymbols)) {
-                analysis.definedSymbols.add(methodName);
-                symbolDefinitions.put(methodName, analysis.originalPath);
-
-                if (modifier != null && (modifier.equals("override") || modifier.equals("virtual") || modifier.equals("abstract"))) {
-                    overrideMethods.add(methodName);
-                }
-            }
+        if (!"none".equals(options.mapFile)) {
+            Path mapPath = options.mapFile == null ? output.resolve("obfuscation-map.txt") : Paths.get(options.mapFile);
+            Files.writeString(mapPath, buildMap(project, analyzer), StandardCharsets.UTF_8);
+            out.println("  rename map: " + mapPath);
         }
-
-        Pattern fieldPattern = Pattern.compile(
-                "(?:public|private|protected|internal|static)?\\s*(?:readonly|const)?\\s*" +
-                        "(?:[A-Z]\\w*(?:<[^>]+>)?)\\s+([a-zA-Z_]\\w*)\\s*[;=]"
-        );
-        Matcher fieldMatcher = fieldPattern.matcher(content);
-        while (fieldMatcher.find()) {
-            String fieldName = fieldMatcher.group(1);
-            if (!shouldIgnore(fieldName) && !serializedFields.contains(fieldName)) {
-                analysis.definedSymbols.add(fieldName);
-                symbolDefinitions.put(fieldName, analysis.originalPath);
-            }
-        }
+        out.println("Done.");
+        return 0;
     }
 
-    private static void findReferencedSymbols(String content, FileAnalysis analysis) {
-        String[] lines = content.split("\n");
-        for (String line : lines) {
-            line = line.trim();
-            if (line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) {
+    // ------------------------------------------------------------------ rewriting
+
+    private static void rewrite(Model.CsFile f, Resolver resolver, Analyzer analyzer, Options options) {
+        for (int i = 0; i < f.sig.size(); i++) {
+            Token t = f.tok(i);
+            if (!t.isIdent()) continue;
+            if (f.nsCtx[i] || f.namedArg[i]) continue;
+            if (Token.CONTEXTUAL_KEYWORDS.contains(t.value)) continue;
+            if (i > 0 && f.tok(i - 1).isKeyword("goto")) continue;
+            Resolver.Binding b;
+            try {
+                b = resolver.bind(f, i);
+            } catch (RuntimeException e) {
                 continue;
             }
-
-            Pattern methodCallPattern = Pattern.compile("([a-zA-Z_]\\w*)\\s*\\(");
-            Matcher matcher = methodCallPattern.matcher(line);
-            while (matcher.find()) {
-                String referencedSymbol = matcher.group(1);
-                if (!shouldIgnore(referencedSymbol)) {
-                    analysis.referencedSymbols.add(referencedSymbol);
-                }
-            }
-
-            Pattern fieldAccessPattern = Pattern.compile("(?:\\.|^|\\s)([a-zA-Z_]\\w*)(?:\\s*[=;]|\\s+)");
-            matcher = fieldAccessPattern.matcher(line);
-            while (matcher.find()) {
-                String referencedSymbol = matcher.group(1);
-                if (!shouldIgnore(referencedSymbol)) {
-                    analysis.referencedSymbols.add(referencedSymbol);
-                }
-            }
-
-            Pattern typePattern = Pattern.compile("\\bnew\\s+([a-zA-Z_]\\w*)\\s*\\(");
-            matcher = typePattern.matcher(line);
-            while (matcher.find()) {
-                String referencedSymbol = matcher.group(1);
-                if (!shouldIgnore(referencedSymbol)) {
-                    analysis.referencedSymbols.add(referencedSymbol);
-                }
-            }
-        }
-    }
-
-    private static void findSerializedFields(String content) {
-        String[] lines = content.split("\n");
-        boolean nextFieldIsSerialized = false;
-
-        for (String line : lines) {
-            line = line.trim();
-
-            for (String attr : serializationAttributes) {
-                if (line.contains("[" + attr)) {
-                    nextFieldIsSerialized = true;
+            switch (b.kind) {
+                case LOCAL:
+                    if (b.local.newName != null) t.text = b.local.newName;
+                    break;
+                case MEMBER:
+                case TYPE: {
+                    String n = analyzer.globalMap.get(t.value);
+                    if (n != null) t.text = n;
                     break;
                 }
-            }
-
-            if (nextFieldIsSerialized && (line.contains("public") || line.contains("private"))) {
-                Pattern fieldPattern = Pattern.compile("(?:public|private)\\s+(?:\\w+)\\s+(\\w+)");
-                Matcher matcher = fieldPattern.matcher(line);
-                if (matcher.find()) {
-                    String fieldName = matcher.group(1);
-                    serializedFields.add(fieldName);
-                }
-                nextFieldIsSerialized = false;
-            }
-
-            if (line.startsWith("public ") && !line.contains("static") && !line.contains("const")) {
-                Pattern fieldPattern = Pattern.compile("public\\s+(?:\\w+)\\s+(\\w+)");
-                Matcher matcher = fieldPattern.matcher(line);
-                if (matcher.find()) {
-                    String fieldName = matcher.group(1);
-                    serializedFields.add(fieldName);
-                }
+                default:
+                    break;
             }
         }
     }
 
-    private static void buildCrossReferences() {
-        for (FileAnalysis analysis : fileAnalyses.values()) {
-            for (String referencedSymbol : analysis.referencedSymbols) {
-                if (!symbolReferences.containsKey(referencedSymbol)) {
-                    symbolReferences.put(referencedSymbol, new HashSet<>());
-                }
-                symbolReferences.get(referencedSymbol).add(analysis.originalPath);
+    private static String render(Model.CsFile f, Options options) {
+        StringBuilder sb = new StringBuilder();
+        for (Token t : f.all) {
+            if (t.kind == Token.Kind.COMMENT && !options.keepComments) {
+                sb.append(' ');
+                continue;
             }
+            if (t.kind == Token.Kind.EOF) break;
+            sb.append(t.text);
         }
-
-        for (FileAnalysis analysis : fileAnalyses.values()) {
-            for (String definedSymbol : analysis.definedSymbols) {
-                if (!globalVariableMap.containsKey(definedSymbol)) {
-                    globalVariableMap.put(definedSymbol, "");
-                }
-            }
-        }
+        return sb.toString();
     }
 
-    private static void obfuscate(HashMap<String, String> varMap, File[] files) throws IOException {
-        genNewNames(varMap);
-
-        String inputRoot = Paths.get("src/filesForObfuscation").toAbsolutePath().toString();
-        String outputRoot = Paths.get("src/ObfuscatedFiles").toAbsolutePath().toString();
-
-        for (File file : files) {
-            Scanner scnr = new Scanner(file);
-            StringBuilder content = new StringBuilder();
-            while (scnr.hasNextLine()) {
-                content.append(scnr.nextLine()).append("\n");
-            }
-            scnr.close();
-
-            String fileContent = content.toString();
-            String obfuscatedContent = applyObfuscation(fileContent, varMap);
-
-            String relativePath = Paths.get(inputRoot).relativize(Paths.get(file.getAbsolutePath())).toString();
-            File outFile = new File(outputRoot, relativePath);
-
-            outFile.getParentFile().mkdirs();
-
-            BufferedWriter write = new BufferedWriter(new FileWriter(outFile));
-            write.write(obfuscatedContent);
-            write.close();
-
-            System.out.println("Obfuscated: " + relativePath);
+    /** Output path: rename the file when it is named after a renamed type it declares. */
+    private static String outputPathFor(Model.CsFile f, Analyzer analyzer) {
+        String rel = f.relativePath;
+        int slash = rel.lastIndexOf('/');
+        String dir = slash < 0 ? "" : rel.substring(0, slash + 1);
+        String base = rel.substring(slash + 1, rel.length() - 3); // strip .cs
+        for (Model.TypeDecl t : f.types) {
+            String n = analyzer.globalMap.get(t.name);
+            if (n == null) continue;
+            if (base.equals(t.name)) return dir + n + ".cs";
         }
+        for (Model.TypeDecl t : f.types) {
+            String n = analyzer.globalMap.get(t.name);
+            if (n == null) continue;
+            if (base.startsWith(t.name + ".")) return dir + n + base.substring(t.name.length()) + ".cs";
+        }
+        return rel;
     }
 
-    private static String applyObfuscation(String content, HashMap<String, String> varMap) {
-        List<Map.Entry<String, String>> sortedEntries = new ArrayList<>(varMap.entrySet());
-        sortedEntries.sort((a, b) -> Integer.compare(b.getKey().length(), a.getKey().length()));
-
-        for (Map.Entry<String, String> entry : sortedEntries) {
-            String original = entry.getKey();
-            String obfuscated = entry.getValue();
-
-            if (!obfuscated.isEmpty()) {
-                String regex = "\\b" + Pattern.quote(original) + "\\b";
-                content = content.replaceAll(regex, obfuscated);
-            }
-        }
-
-        return content;
-    }
-
-    private static void genNewNames(HashMap<String, String> varMap) {
-        List<String> wordBank = new LinkedList<>();
-        String[] letters = "abcdefghijklmnopqrstuvwxyz".split("");
-
-        for (int i = 0; i < letters.length; ++i) {
-            wordBank.add(letters[i]);
-        }
-
-        for (String letter1 : letters) {
-            for (String letter2 : letters) {
-                wordBank.add(letter1 + letter2);
-            }
-        }
-
-        String[] keySet = varMap.keySet().toArray(new String[0]);
-        for (String key : keySet) {
-            if (shouldRemoveFromObfuscation(key)) {
-                varMap.remove(key);
-            }
-        }
-
-        int j = 0;
-        for (String key : varMap.keySet()) {
-            String newWord = GenerateWord("", wordBank, j);
-            varMap.replace(key, newWord);
-            ++j;
-        }
-    }
-
-    private static boolean shouldRemoveFromObfuscation(String key) {
-        for (String word : wordsToIgnore) {
-            if (key.contains(word)) {
-                return true;
-            }
-        }
-
-        if (key.contains(".")) {
-            return true;
-        }
-
-        if (key.contains("<") && !key.contains("T")) {
-            return true;
-        }
-
-        if (serializedFields.contains(key)) {
-            return true;
-        }
-
-        if (overrideMethods.contains(key)) {
-            return true; // skip overridden/virtual/abstract methods
-        }
-
-        if (key.length() <= 1) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static String GenerateWord(String word, List<String> wordBank, int index) {
-        int bankLen = wordBank.size();
-
-        if (index >= bankLen) {
-            return GenerateWord(word + wordBank.get(index % bankLen), wordBank, index - bankLen);
-        } else {
-            return word + wordBank.get(index);
-        }
-    }
-
-    private static void loadVariables(HashMap<String, String> variableMap, File[] files) throws FileNotFoundException {
-        boolean debug = false;
-
-        for (File file : files) {
-            Scanner scnr = new Scanner(file);
-            while (scnr.hasNextLine()) {
-                String line = scnr.nextLine();
-
-                if (line.contains("class")) {
-                    int startIndex = line.indexOf("class") + "class".length() + 1;
-                    int endIndex = 0;
-
-                    if (line.substring(startIndex).contains(" ")) {
-                        endIndex = line.substring(startIndex).indexOf(' ') + startIndex;
-                    } else if (line.substring(startIndex).contains("{")) {
-                        endIndex = line.substring(startIndex).indexOf('{') + startIndex;
-                    } else if (line.substring(startIndex).contains(":")) {
-                        endIndex = line.substring(startIndex).indexOf(':') + startIndex;
-                    } else {
-                        endIndex = line.substring(startIndex).length() + startIndex;
-                    }
-
-                    if (debug)
-                        System.out.println(line.substring(startIndex, endIndex));
-                    try {
-                        String className = line.substring(startIndex, endIndex).trim();
-                        if (!shouldIgnore(className)) {
-                            variableMap.put(className, "");
-                        }
-                    } catch (Exception e) {
-                        System.out.println(line);
-                        System.out.println(e);
-                    }
-                } else if (line.contains("(") && !line.trim().startsWith("//")) {
-                    int endIndex = line.indexOf("(");
-
-                    while (endIndex > 0 && (line.charAt(endIndex - 1) == ' ' || line.charAt(endIndex) == ' ')) {
-                        endIndex -= 1;
-                    }
-                    int startIndex = 0;
-
-                    for (int i = endIndex - 1; i >= 0 && line.charAt(i) != ' '; --i) {
-                        startIndex = i;
-                    }
-
-                    if (line.charAt(endIndex) != ' ' && line.charAt(endIndex) != '(')
-                        ++endIndex;
-
-                    try {
-                        String methodName = line.substring(startIndex, endIndex).trim();
-                        if (variableMap.get(methodName) == null && !shouldIgnore(methodName)) {
-                            variableMap.put(methodName, "");
-                        }
-                    } catch (Exception e) {
-                        // ignore
-                    }
-                } else if (line.contains(";") && !line.contains("import") && !line.contains("using") && !line.trim().startsWith("//")) {
-                    if (line.contains("=")) {
-                        int endIndex = line.indexOf("=");
-
-                        while (endIndex > 0 && line.charAt(endIndex - 1) == ' ') {
-                            endIndex -= 1;
-                        }
-
-                        int startIndex = 0;
-                        for (int i = endIndex - 1; i >= 0 && line.charAt(i) != ' '; --i) {
-                            startIndex = i;
-                        }
-
-                        try {
-                            String varName = line.substring(startIndex, endIndex).trim();
-                            if (variableMap.get(varName) == null && !shouldIgnore(varName)) {
-                                variableMap.put(varName, "");
-                            }
-                        } catch (Exception e) {
-                            // ignore
-                        }
+    private static String buildMap(Model.Project project, Analyzer analyzer) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Simple-Obfuscator rename map\n");
+        sb.append("# kind\toriginal\tobfuscated\n");
+        List<Model.TypeDecl> types = new ArrayList<>(project.typesByKey.values());
+        types.sort(Comparator.comparing(Model.TypeDecl::fullName));
+        for (Model.TypeDecl t : types) {
+            String n = analyzer.globalMap.get(t.name);
+            sb.append(n != null ? "type" : "type-kept").append('\t').append(t.fullName()).append('\t').append(n != null ? n : t.name).append('\n');
+            List<Model.MemberDecl> members = new ArrayList<>(t.members);
+            members.sort(Comparator.comparing(m -> m.name));
+            for (Model.MemberDecl m : members) {
+                if (m.kind == Model.MemberKind.CTOR || m.kind == Model.MemberKind.DTOR || m.kind == Model.MemberKind.OPERATOR || m.kind == Model.MemberKind.INDEXER) continue;
+                if (m.attributes.contains("DelegateInvoke")) continue;
+                String mn = analyzer.globalMap.get(m.name);
+                sb.append(mn != null ? "member" : "member-kept").append('\t').append(t.fullName()).append('.').append(m.name)
+                        .append('\t').append(mn != null ? mn : m.name).append('\n');
+                for (Model.LocalVar lv : m.locals) {
+                    if (lv.newName != null) {
+                        sb.append("local\t").append(t.fullName()).append('.').append(m.name).append("()/").append(lv.name)
+                                .append('\t').append(lv.newName).append('\n');
                     }
                 }
             }
-            scnr.close();
         }
-    }
-
-    private static String removeCommentsAndStrings(String content) {
-        content = content.replaceAll("//.*", "");
-        content = content.replaceAll("/\\*[\\s\\S]*?\\*/", "");
-        content = content.replaceAll("\"([^\"\\\\]|\\\\.)*\"", "\"\"");
-        content = content.replaceAll("'([^'\\\\]|\\\\.)*'", "''");
-        return content;
-    }
-
-    private static boolean shouldIgnore(String name) {
-        for (String word : wordsToIgnore) {
-            if (name.equals(word) || name.contains(word)) {
-                return true;
-            }
+        sb.append("\n# kept names and why\n");
+        for (Map.Entry<String, String> e : analyzer.keep.entrySet()) {
+            if (analyzer.declaredNames.contains(e.getKey())) sb.append("# ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
         }
+        return sb.toString();
+    }
 
-        // Additional protection for Unity event system properties
-        if (name.matches("On[A-Z][a-zA-Z]*") || // OnSomething
-                name.equals("Execute") ||
-                name.equals("OnExecute")) {
-            return true;
+    private static void deleteRecursively(Path dir) throws IOException {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            List<Path> all = new ArrayList<>();
+            walk.forEach(all::add);
+            all.sort(Comparator.reverseOrder());
+            for (Path p : all) Files.delete(p);
         }
-
-        return name.length() <= 1 ||
-                Character.isLowerCase(name.charAt(0)) ||
-                serializedFields.contains(name) ||
-                overrideMethods.contains(name);
-    }
-
-    private static boolean isConstructorName(String methodName, HashSet<String> definedClasses) {
-        return definedClasses.contains(methodName);
-    }
-
-    private static void printStatistics() {
-        System.out.println("\n=== Obfuscation Statistics ===");
-        System.out.println("Files processed: " + fileAnalyses.size());
-        System.out.println("Symbols obfuscated: " + globalVariableMap.size());
-        System.out.println("Serialized fields protected: " + serializedFields.size());
-        System.out.println("Override/virtual/abstract methods protected: " + overrideMethods.size());
     }
 }

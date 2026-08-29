@@ -1,0 +1,105 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1787975485820,
+  "projectRoot": "/home/io/Documents/Simple-Obfuscator",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1787975485819,
+      "keyFiles": [
+        "Main.java",
+        "ObfuscatedFile"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/Resolver.java",
+      "accessCount": 3,
+      "lastAccessed": 1787977419092,
+      "type": "file"
+    },
+    {
+      "path": "src/Parser.java",
+      "accessCount": 3,
+      "lastAccessed": 1787977525351,
+      "type": "file"
+    },
+    {
+      "path": "src/Token.java",
+      "accessCount": 1,
+      "lastAccessed": 1787976435507,
+      "type": "file"
+    },
+    {
+      "path": "src/Lexer.java",
+      "accessCount": 1,
+      "lastAccessed": 1787976476748,
+      "type": "file"
+    },
+    {
+      "path": "src/Model.java",
+      "accessCount": 1,
+      "lastAccessed": 1787976519217,
+      "type": "file"
+    },
+    {
+      "path": "src/UnityNames.java",
+      "accessCount": 1,
+      "lastAccessed": 1787977173353,
+      "type": "file"
+    },
+    {
+      "path": "src/Analyzer.java",
+      "accessCount": 1,
+      "lastAccessed": 1787977243734,
+      "type": "file"
+    },
+    {
+      "path": "src/Main.java",
+      "accessCount": 1,
+      "lastAccessed": 1787977345594,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1787977696334,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
